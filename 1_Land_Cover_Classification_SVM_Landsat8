@@ -1,0 +1,105 @@
+// For training and testing samples, check here:
+// https://code.earthengine.google.com/9921a833cf424b1812436732cdc43bd5
+
+// SCALING & MASKING FUNCTION
+// Code reference: https://gis.stackexchange.com/a/425160
+// A function that scales and masks Landsat 8 (C2) surface reflectance images.
+function prepSrL8(image) {
+  // Develop masks for unwanted pixels (fill, cloud, cloud shadow).
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+  // Apply the scaling factors to the appropriate bands.
+  var getFactorImg = function(factorNames) {
+    var factorList = image.toDictionary().select(factorNames).values();
+    return ee.Image.constant(factorList);
+  };
+  var scaleImg = getFactorImg([
+    'REFLECTANCE_MULT_BAND_.|TEMPERATURE_MULT_BAND_ST_B10']);
+  var offsetImg = getFactorImg([
+    'REFLECTANCE_ADD_BAND_.|TEMPERATURE_ADD_BAND_ST_B10']);
+  var scaled = image.select('SR_B.|ST_B10').multiply(scaleImg).add(offsetImg);
+  // Replace original bands with scaled bands and apply masks.
+  return image.addBands(scaled, null, true)
+    .updateMask(qaMask).updateMask(saturationMask);
+}
+
+// CALLING THE IMAGERY PRODUCTS
+// Landsat 8 Collection 2 surface reflectance images of interest.
+var composite = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(roi)
+  .filterDate('2017-01-01', '2017-12-31') // Case: One year data
+  .map(prepSrL8)
+  .select('SR.*')
+  .median();
+print(composite, 'L8_sel');
+
+// DISPLAYING THE COMPOSITE
+// Display the cloud-free median composite.
+// True color composite
+var visParams = {
+  bands: ['SR_B4', 'SR_B3', 'SR_B2'],
+  min: 0,
+  max: 0.3,
+};
+// False color composite
+var visParams2 = {
+  bands: ['SR_B6', 'SR_B5', 'SR_B2'],
+  min: 0,
+  max: 0.3,
+};
+Map.addLayer(composite.clip(roi), visParams, 'TrueColor');
+Map.addLayer(composite.clip(roi), visParams2, 'FalseColor');
+
+// CLASSIFICATION
+// This code classifies the imagery into five class:
+// (1) Permukiman (Built-up area); (2) Air (Water); (3) Sawah (Agriculture);
+// (4) Ladang (Farm field); and (5) Kebun (Plantation, including forest).
+var aoi = Permukiman.merge(Air).merge(Sawah).merge(Ladang).merge(Kebun);
+// Bands involved
+var bands = ['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5','SR_B6','SR_B7'];
+
+// Training preparation
+var training = composite.select(bands).sampleRegions({
+collection: aoi,
+properties: ['lc'],
+scale: 30
+});
+// Training using SVM algorithm
+var classifier = ee.Classifier.libsvm().train({
+features: training,
+classProperty: 'lc',
+inputProperties: bands
+});
+// Classification results and visualizations
+var classified = composite.select(bands).classify(classifier);
+
+Map.addLayer(classified.clip(roi),
+{min: 0, max: 4, palette:['red','darkblue','green','yellow','lightgreen']},
+'classification');
+
+// ACCURACY TESTING
+var uji_aoi = PermukimanTest.merge(AirTest).merge(SawahTest)
+              .merge(LadangTest).merge(KebunTest);
+// Evaluation preparation
+var validasi = classified.sampleRegions({
+  collection: uji_aoi,
+  properties: ['lc'],
+  scale: 30,
+});
+// Evaluation using accuracy and confusion matrix
+var akurasi = validasi.errorMatrix('lc', 'classification');
+print('Confusion matrix', akurasi);
+print('Overall accuracy: ', akurasi.accuracy());
+
+// EXPORTING
+Export.image.toDrive({
+  image: classified,
+  description: 'LULC_Blora',
+  folder: "SKRIPSI_SURF_INDEX",
+  scale: 30,
+  region: roi,
+  fileFormat: 'GeoTIFF',
+  formatOptions: {
+    cloudOptimized: true
+  }
+});
